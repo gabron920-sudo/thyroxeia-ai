@@ -658,7 +658,7 @@ const _BACKEND_READY = true
 // 🔴 BUG FIX: was using wrong project jxmajkyfbznmcixsghjz → now matches backend project
 const SUPABASE_URL  = 'https://odyywykbaahgmnvashrs.supabase.co'
 // Get this anon key from: Supabase Dashboard → odyywykbaahgmnvashrs → Settings → API → anon/public
-const SUPABASE_ANON = 'REPLACE_WITH_ANON_KEY_FROM_SUPABASE_DASHBOARD_FOR_odyywykbaahgmnvashrs'
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9keXl3eWtiYWFoZ21udmFzaHJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1NzgxMDMsImV4cCI6MjA5MjE1NDEwM30.uL-T1K3vJ_v0YfC_L4DscH72uOOfA_o2O_W8N5e2_l8'
 const { createClient } = supabase
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON, {
   auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true }
