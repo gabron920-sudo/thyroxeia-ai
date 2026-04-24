@@ -12,7 +12,8 @@
  * Headers: Authorization: Bearer <supabase_jwt>
  * Body: { type, payload }
  *
- * Supported types: generate-cards, generate-quiz, grade-answer, chat, study-guide
+ * Env vars for key rotation:
+ *   GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, GEMINI_API_KEY_4, GEMINI_API_KEY_5
  */
 
 import { Router }     from 'express'
@@ -33,7 +34,6 @@ function buildKeyPool() {
   return keys
 }
 
-// Track exhausted keys: { index: { exhaustedAt, retryAfter } }
 const exhaustedKeys = {}
 
 function getAvailableKey(keys) {
@@ -42,20 +42,19 @@ function getAvailableKey(keys) {
     const e = exhaustedKeys[i]
     if (!e || now >= e.retryAfter) return { key: keys[i], index: i }
   }
-  // All exhausted — return soonest-recovery key
   let soonest = 0
   for (let i = 1; i < keys.length; i++) {
     if ((exhaustedKeys[i]?.retryAfter || 0) < (exhaustedKeys[soonest]?.retryAfter || 0)) soonest = i
   }
+  console.warn('[Gemini] All keys quota-exhausted, using soonest-recovery key')
   return { key: keys[soonest], index: soonest }
 }
 
 function markKeyExhausted(index) {
   exhaustedKeys[index] = { exhaustedAt: Date.now(), retryAfter: Date.now() + 60 * 60 * 1000 }
-  console.warn(`[Gemini] Key #${index + 1} marked exhausted — retry after 60 min`)
+  console.warn(`[Gemini] Key #${index + 1} marked exhausted — will retry after 60 min`)
 }
 
-// ── Gemini call with automatic key rotation ───────────────────────────────────
 async function gemini(prompt, maxTokens = 4096) {
   const { default: fetch } = await import('node-fetch')
   const keys = buildKeyPool()
@@ -75,10 +74,13 @@ async function gemini(prompt, maxTokens = 4096) {
       })
 
       if (resp.status === 429 || resp.status === 503) {
+        await resp.text()
+        console.warn(`[Gemini] Key #${index + 1} returned ${resp.status} — rotating`)
         markKeyExhausted(index)
         lastError = new Error(`Key #${index + 1} quota/overload (${resp.status})`)
         continue
       }
+
       if (!resp.ok) {
         const body = await resp.text()
         throw new Error(`Gemini error ${resp.status}: ${body.substring(0, 200)}`)
@@ -86,7 +88,7 @@ async function gemini(prompt, maxTokens = 4096) {
 
       const data = await resp.json()
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
-      if (index > 0) console.log(`[Gemini] Used key #${index + 1} (primary exhausted)`)
+      if (index > 0) console.log(`[Gemini] Used key #${index + 1} (primary was exhausted)`)
       return text
 
     } catch (err) {
@@ -98,7 +100,8 @@ async function gemini(prompt, maxTokens = 4096) {
       throw err
     }
   }
-  throw new Error(`All Gemini keys exhausted. ${lastError?.message || ''}`)
+
+  throw new Error(`All Gemini API keys exhausted. ${lastError?.message || ''}`)
 }
 
 // ── Supabase clients ──────────────────────────────────────────────────────────
@@ -110,7 +113,7 @@ const sbAnon = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
   : null
 
-// ── Auth: verify JWT ──────────────────────────────────────────────────────────
+// ── Auth: verify Supabase JWT ────────────────────────────────────────────────
 async function getUserFromToken(req) {
   const auth  = req.headers['authorization'] || ''
   const token = auth.replace('Bearer ', '').trim()
@@ -122,7 +125,7 @@ async function getUserFromToken(req) {
   return data.user
 }
 
-// ── Get user plan ─────────────────────────────────────────────────────────────
+// ── Get user plan from profiles ──────────────────────────────────────────────
 async function getUserPlan(userId) {
   if (!sb) return 'free'
   const { data } = await sb.from('profiles').select('plan').eq('id', userId).single()
@@ -132,32 +135,39 @@ async function getUserPlan(userId) {
 // ── Daily usage check + increment ────────────────────────────────────────────
 async function checkAndIncrementUsage(userId, plan) {
   const limit = PLAN_LIMITS[plan] || 5
-  if (!sb) return { allowed: true, used: 0, limit }
+  if (!sb) {
+    console.warn('[AI] Supabase not configured — skipping usage tracking')
+    return { allowed: true, used: 0, limit }
+  }
 
   const today = new Date().toISOString().slice(0, 10)
   const { count } = await sb.from('ai_usage')
     .select('*', { count: 'exact', head: true })
     .eq('user_id', userId)
     .gte('created_at', `${today}T00:00:00.000Z`)
+
   const current = count || 0
   if (current >= limit) return { allowed: false, used: current, limit }
 
+  // Insert usage record
   await sb.from('ai_usage').insert({
-    user_id: userId,
-    model:   GEMINI_MODEL,
+    user_id:    userId,
+    model:      GEMINI_MODEL,
     created_at: new Date().toISOString()
   })
+
   return { allowed: true, used: current + 1, limit }
 }
 
 function parseJsonArray(text) {
   const m = text.match(/\[[\s\S]*\]/)
-  if (!m) throw new Error('AI returned invalid JSON array')
+  if (!m) throw new Error('AI returned invalid format — could not find JSON array')
   return JSON.parse(m[0])
 }
+
 function parseJsonObject(text) {
   const m = text.match(/\{[\s\S]*\}/)
-  if (!m) throw new Error('AI returned invalid JSON object')
+  if (!m) throw new Error('AI returned invalid format — could not find JSON object')
   return JSON.parse(m[0])
 }
 
@@ -166,17 +176,19 @@ router.post('/', async (req, res) => {
   const { type, payload } = req.body || {}
   if (!type || !payload) return res.status(400).json({ error: 'Missing type or payload' })
 
+  // Validate at least one Gemini key is configured
   try { buildKeyPool() } catch (e) {
     return res.status(500).json({ error: 'No Gemini API keys configured on server' })
   }
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // ── Auth ───────────────────────────────────────────────────────────────────
   const user = await getUserFromToken(req)
   if (!user) return res.status(401).json({ error: 'Unauthorized — please log in' })
 
-  // ── Rate limiting ─────────────────────────────────────────────────────────
+  // ── Rate limiting ──────────────────────────────────────────────────────────
   const plan = await getUserPlan(user.id)
   const { allowed, used, limit } = await checkAndIncrementUsage(user.id, plan)
+
   if (!allowed) {
     return res.status(429).json({
       error: `Daily AI limit reached (${limit} calls/day on the ${plan} plan). Upgrade for more!`,
@@ -190,7 +202,7 @@ router.post('/', async (req, res) => {
   try {
     switch (type) {
 
-      // ── Generate flashcards ───────────────────────────────────────────────
+      // ── Generate flashcards ─────────────────────────────────────────────
       case 'generate-cards': {
         const { text, count = 15 } = payload
         if (!text) return res.status(400).json({ error: 'Missing text' })
@@ -203,7 +215,7 @@ router.post('/', async (req, res) => {
         return res.json({ cards: parseJsonArray(raw), used, limit })
       }
 
-      // ── Generate quiz ─────────────────────────────────────────────────────
+      // ── Generate quiz ───────────────────────────────────────────────────
       case 'generate-quiz': {
         const { cards, count = 10 } = payload
         if (!Array.isArray(cards) || !cards.length) return res.status(400).json({ error: 'Missing cards' })
@@ -218,7 +230,7 @@ router.post('/', async (req, res) => {
         return res.json({ quiz: parseJsonArray(raw), used, limit })
       }
 
-      // ── Grade typed answer ────────────────────────────────────────────────
+      // ── Grade typed answer ──────────────────────────────────────────────
       case 'grade-answer': {
         const { question, correctAnswer, userAnswer } = payload
         if (!question || !correctAnswer || !userAnswer) return res.status(400).json({ error: 'Missing fields' })
@@ -231,7 +243,7 @@ router.post('/', async (req, res) => {
         return res.json({ ...parseJsonObject(raw), used, limit })
       }
 
-      // ── AI Tutor chat ─────────────────────────────────────────────────────
+      // ── AI Tutor chat ───────────────────────────────────────────────────
       case 'chat': {
         const { message, history = [] } = payload
         if (!message) return res.status(400).json({ error: 'Missing message' })
@@ -246,7 +258,7 @@ router.post('/', async (req, res) => {
         return res.json({ reply: reply.trim(), used, limit })
       }
 
-      // ── Study guide ───────────────────────────────────────────────────────
+      // ── Study guide ─────────────────────────────────────────────────────
       case 'study-guide': {
         const { deckName, cards } = payload
         if (!Array.isArray(cards) || !cards.length) return res.status(400).json({ error: 'Missing cards' })
@@ -263,6 +275,7 @@ router.post('/', async (req, res) => {
       default:
         return res.status(400).json({ error: `Unknown AI type: ${type}` })
     }
+
   } catch (err) {
     console.error('[AI route error]', err.message)
     res.status(500).json({ error: err.message })
