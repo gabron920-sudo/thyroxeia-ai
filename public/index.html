@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="X-Content-Type-Options" content="nosniff"/>
+<meta http-equiv="X-Frame-Options" content="SAMEORIGIN"/>
+<meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>Thyroxeia AI — Study Smarter with Gemini AI</title>
 <meta name="description" content="Thyroxeia AI turns your notes, PDFs, and topics into flashcards, quizzes, and a real AI tutor — powered by advanced Gemini AI."/>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>"/>
@@ -823,17 +826,9 @@ async function handleSignup(e) {
   btn.disabled = false; btn.textContent = '✨ Create Account'
   if (error) { toast(error.message, 'error'); return }
 
-  // Step 2: Railway backend sends our branded verification email (fire & forget)
-  // Supabase already sent the OTP — Railway backend sends a nicer branded version
-  try {
-    await backend(BACKEND.AUTH_EMAIL, {
-      action: 'send-verification',
-      payload: { email, firstName: first, otp: '(check your email from Supabase)' }
-    })
-  } catch(e) {
-    // Non-fatal — Supabase email still works as backup
-    console.warn('Branded email failed:', e.message)
-  }
+  // Supabase sends the real OTP — we do NOT send a separate branded email here
+  // because we cannot intercept Supabase's generated OTP token.
+  // The welcome email is sent AFTER the user verifies successfully.
 
   localStorage.setItem('verify_email', email)
   document.getElementById('verify-email-display').textContent = email
@@ -864,7 +859,7 @@ async function handleVerify() {
   btn.disabled = true; btn.textContent = 'Verifying...'
 
   // OTP verification goes through Supabase (they issued it)
-  const { error } = await sb.auth.verifyOtp({ email, token: code, type: 'signup' })
+  const { data: verifyData, error } = await sb.auth.verifyOtp({ email, token: code, type: 'signup' })
 
   if (error) {
     toast(error.message || 'Invalid code. Please try again.', 'error')
@@ -874,14 +869,24 @@ async function handleVerify() {
   } else {
     localStorage.removeItem('verify_email')
     toast('Email verified! Welcome to Thyroxeia AI 🎉', 'success')
+    // Set user immediately from verifyOtp result (don't wait for onAuthStateChange)
+    if (verifyData?.session) {
+      currentUser = verifyData.session.user
+    }
     // Send welcome email via Railway backend
-    const meta = currentUser?.user_metadata || {}
+    const meta = (currentUser || verifyData?.user)?.user_metadata || {}
+    const firstName = meta.first_name || document.getElementById('signup-first')?.value || ''
     try {
       await backend(BACKEND.AUTH_EMAIL, {
         action: 'send-welcome',
-        payload: { email, firstName: meta.first_name || '' }
+        payload: { email, firstName }
       })
     } catch(e) { /* non-fatal */ }
+    // Explicitly navigate to app — don't rely solely on onAuthStateChange timing
+    if (currentUser) {
+      await loadProfile()
+      showPage('app')
+    }
   }
 }
 

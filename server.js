@@ -7,6 +7,8 @@
 import 'dotenv/config'
 import express       from 'express'
 import cors          from 'cors'
+import helmet        from 'helmet'
+import rateLimit     from 'express-rate-limit'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { createClient } from '@supabase/supabase-js'
@@ -23,6 +25,48 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const sb = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
   : null
+
+// ── Security headers (Helmet)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:     ["'self'"],
+      scriptSrc:      ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net', 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://fonts.googleapis.com'],
+      styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc:         ["'self'", 'data:', 'https:'],
+      connectSrc:     ["'self'", 'https://*.supabase.co', 'https://generativelanguage.googleapis.com', 'https://api-m.paypal.com', 'https://api-m.sandbox.paypal.com'],
+      frameSrc:       ["'self'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com'],
+      objectSrc:      ["'none'"],
+      upgradeInsecureRequests: [],
+    }
+  },
+  crossOriginEmbedderPolicy: false,   // needed for PayPal iframe
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+  noSniff: true,
+  frameguard: { action: 'sameorigin' },
+  xssFilter: true,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}))
+
+// ── Global rate limiter — 200 req/15 min per IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests — please slow down.' },
+})
+app.use(globalLimiter)
+
+// ── Strict limiter for sensitive endpoints — 20 req/15 min per IP
+export const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests on this endpoint.' },
+})
 
 // ── CORS — allow same-origin (frontend served from here) + any listed FRONTEND_URL
 app.use(cors({
@@ -49,18 +93,9 @@ app.use('/ai',      aiRouter)
 app.use('/payment', paymentRouter)
 app.use('/auth',    authRouter)
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── Health check (no config info leaked) ─────────────────────────────────────
 app.get('/health', (_req, res) => {
-  const geminiKeys = [1,2,3,4,5].filter(i => process.env[`GEMINI_API_KEY${i > 1 ? '_' + i : ''}`])
-  res.json({
-    status: 'ok',
-    service: 'Thyroxeia AI Backend',
-    version: '1.0.0',
-    geminiKeys: `${geminiKeys.length} key(s) configured`,
-    supabase: !!process.env.SUPABASE_SERVICE_KEY,
-    paypal: !!process.env.PAYPAL_CLIENT_SECRET,
-    smtp: !!process.env.SMTP_USER,
-  })
+  res.json({ status: 'ok', service: 'Thyroxeia AI', version: '1.0.0' })
 })
 
 // ── Admin: view users + payment proof (requires X-Admin-Key header) ───────────

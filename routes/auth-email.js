@@ -10,9 +10,20 @@
 
 import { Router }     from 'express'
 import nodemailer     from 'nodemailer'
+import rateLimit      from 'express-rate-limit'
 import { createClient } from '@supabase/supabase-js'
 
 const router = Router()
+
+// 5 email actions per 10 min per IP — prevents email spam abuse
+const emailLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many email requests. Please wait before trying again.' },
+})
+router.use(emailLimiter)
 
 const sb = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
@@ -119,11 +130,22 @@ router.post('/', async (req, res) => {
   const { action, payload } = req.body || {}
   if (!action || !payload) return res.status(400).json({ error: 'Missing action or payload' })
 
-  // ── Elite shoutout (no email needed) ──────────────────────────────────────
+  // ── Elite shoutout (requires valid JWT) ──────────────────────────────────
   if (action === 'elite-shoutout') {
-    const { userId, displayName } = payload
-    if (!userId || !displayName) return res.status(400).json({ error: 'Missing userId or displayName' })
+    // Verify JWT — only authenticated users can create shoutouts
+    const authHeader = req.headers['authorization'] || ''
+    const token = authHeader.replace('Bearer ', '').trim()
+    if (!token) return res.status(401).json({ error: 'Unauthorized' })
     if (!sb) return res.status(500).json({ error: 'Supabase not configured' })
+    const sbAnon = (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY)
+      ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY) : null
+    const anonClient = sbAnon || sb
+    const { data: authData, error: authErr } = await anonClient.auth.getUser(token)
+    if (authErr || !authData?.user) return res.status(401).json({ error: 'Invalid or expired session' })
+    // Force userId to come from the verified JWT — never trust client-sent userId
+    const userId = authData.user.id
+    const { displayName } = payload
+    if (!displayName) return res.status(400).json({ error: 'Missing displayName' })
 
     try {
       // Check if this user already got a shoutout (once per user)
