@@ -742,13 +742,19 @@ function scrollToSection(id) { document.getElementById(id)?.scrollIntoView({ beh
 
 // ─── AUTH STATE ────────────────────────────────────────────────────────────
 sb.auth.onAuthStateChange(async (event, session) => {
-  if (event === 'SIGNED_IN' && session) {
+  // Handle SIGNED_IN (normal login) AND INITIAL_SESSION (email link / magic link clicks)
+  if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
+    // Avoid re-running if we're already in the app for this user
+    if (currentUser?.id === session.user.id && document.getElementById('page-app')?.classList.contains('active')) return
     currentUser = session.user
     await loadProfile()
     showPage('app')
   } else if (event === 'SIGNED_OUT') {
     currentUser = null
     showPage('landing')
+  } else if (event === 'INITIAL_SESSION' && !session) {
+    // No session on first load — show landing
+    if (!currentUser) showPage('landing')
   }
 })
 
