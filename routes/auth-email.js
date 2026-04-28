@@ -13,6 +13,12 @@ import nodemailer     from 'nodemailer'
 import rateLimit      from 'express-rate-limit'
 import { createClient } from '@supabase/supabase-js'
 
+// ── HTML entity escape ────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  if (typeof str !== 'string') return ''
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;')
+}
+
 const router = Router()
 
 // 5 email actions per 10 min per IP — prevents email spam abuse
@@ -46,6 +52,8 @@ function getTransporter() {
 
 // ── Email templates ───────────────────────────────────────────────────────────
 function verificationTemplate(firstName, otp) {
+  const safeName = escapeHtml(firstName)
+  const safeOtp  = escapeHtml(String(otp || ''))
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
 <style>
   body{margin:0;padding:0;background:#0a0a0f;font-family:Arial,sans-serif;color:#f1f5f9}
@@ -60,10 +68,10 @@ function verificationTemplate(firstName, otp) {
 <div class="wrap">
   <div class="header"><h1>⚡ Thyroxeia AI</h1><p style="margin:6px 0 0;color:rgba(255,255,255,.8);font-size:.9rem">Study Smarter with AI</p></div>
   <div class="body">
-    <p style="font-size:1.05rem;font-weight:600">Hi ${firstName || 'there'}! 👋</p>
+    <p style="font-size:1.05rem;font-weight:600">Hi ${safeName || 'there'}! 👋</p>
     <p style="color:#94a3b8;margin-top:8px">Enter this 6-digit code to verify your email:</p>
     <div class="otp-box">
-      <div class="otp-code">${otp || '——————'}</div>
+      <div class="otp-code">${safeOtp || '——————'}</div>
       <div style="font-size:.8rem;color:#64748b;margin-top:10px">Expires in 10 minutes</div>
     </div>
     <p style="color:#64748b;font-size:.875rem">Didn't sign up? Ignore this email.</p>
@@ -74,6 +82,7 @@ function verificationTemplate(firstName, otp) {
 }
 
 function welcomeTemplate(firstName) {
+  const safeName = escapeHtml(firstName)
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
 <style>
   body{margin:0;padding:0;background:#0a0a0f;font-family:Arial,sans-serif;color:#f1f5f9}
@@ -87,7 +96,7 @@ function welcomeTemplate(firstName) {
 <div class="wrap">
   <div class="header"><h1>🎉 Welcome to Thyroxeia AI!</h1></div>
   <div class="body">
-    <p style="font-size:1.05rem;font-weight:600">You're in, ${firstName || 'friend'}!</p>
+    <p style="font-size:1.05rem;font-weight:600">You're in, ${safeName || 'friend'}!</p>
     <p style="color:#94a3b8;margin:8px 0 24px">Your email is verified. Here's what's waiting:</p>
     <div class="feature"><span style="font-size:1.5rem">🃏</span><div><strong>AI Flashcard Generator</strong><p style="color:#94a3b8;font-size:.85rem;margin:2px 0 0">Paste notes or a topic — Gemini builds your deck in seconds.</p></div></div>
     <div class="feature"><span style="font-size:1.5rem">🧠</span><div><strong>6 Study Modes</strong><p style="color:#94a3b8;font-size:.85rem;margin:2px 0 0">Flashcards, Quiz, Timed Test, Type Answer, Match, Study Guide.</p></div></div>
@@ -100,6 +109,7 @@ function welcomeTemplate(firstName) {
 }
 
 function eliteWelcomeTemplate(firstName) {
+  const safeName = escapeHtml(firstName)
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
 <style>
   body{margin:0;padding:0;background:#0a0a0f;font-family:Arial,sans-serif;color:#f1f5f9}
@@ -113,7 +123,7 @@ function eliteWelcomeTemplate(firstName) {
 <div class="wrap">
   <div class="header"><h1>👑 Welcome to Elite!</h1><p style="margin:6px 0 0;font-weight:600;color:#78350f">You're now part of the top tier.</p></div>
   <div class="body">
-    <p style="font-size:1.05rem;font-weight:600">Congratulations, ${firstName || 'Champion'}! 🏆</p>
+    <p style="font-size:1.05rem;font-weight:600">Congratulations, ${safeName || 'Champion'}! 🏆</p>
     <p style="color:#94a3b8;margin:8px 0 24px">Your Elite plan is now active. Here's what you unlocked:</p>
     <div class="perk"><span style="font-size:1.3rem">⚡</span><div><strong>Everything in Pro</strong><p style="color:#94a3b8;font-size:.85rem;margin:2px 0 0">50 AI calls/day, unlimited decks, all study modes.</p></div></div>
     <div class="perk"><span style="font-size:1.3rem">🌟</span><div><strong>Gold Username Badge</strong><p style="color:#94a3b8;font-size:.85rem;margin:2px 0 0">Your name appears in gold across the platform.</p></div></div>
@@ -166,11 +176,19 @@ router.post('/', async (req, res) => {
       return res.json({ success: true })
     } catch (err) {
       console.error('[Shoutout error]', err.message)
-      return res.status(500).json({ error: err.message })
+      return res.status(500).json({ error: 'Failed to create shoutout.' })
     }
   }
 
-  // ── Email actions ──────────────────────────────────────────────────────────
+  // ── JWT check for welcome emails (prevents email spam) ──────────────────────
+  if (action === 'send-welcome' || action === 'send-elite-welcome') {
+    const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+    if (!token || !sb) return res.status(401).json({ error: 'Authentication required.' })
+    const { data: authData, error: authErr } = await sb.auth.getUser(token)
+    if (authErr || !authData?.user) return res.status(401).json({ error: 'Invalid or expired session.' })
+    payload.email = authData.user.email  // always use verified email from JWT
+  }
+
   const { email, firstName, otp } = payload
   if (!email) return res.status(400).json({ error: 'Missing email' })
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email' })
@@ -210,7 +228,7 @@ router.post('/', async (req, res) => {
 
   } catch (err) {
     console.error('[Auth email error]', err.message)
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'Failed to send email. Please try again.' })
   }
 })
 

@@ -35,7 +35,7 @@ app.use(helmet({
       styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
       imgSrc:         ["'self'", 'data:', 'https:'],
-      connectSrc:     ["'self'", 'https://*.supabase.co', 'https://generativelanguage.googleapis.com', 'https://api-m.paypal.com', 'https://api-m.sandbox.paypal.com'],
+      connectSrc:     ["'self'", 'https://*.supabase.co', 'wss://*.supabase.co', 'https://generativelanguage.googleapis.com', 'https://api-m.paypal.com', 'https://api-m.sandbox.paypal.com'],
       frameSrc:       ["'self'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com'],
       objectSrc:      ["'none'"],
       upgradeInsecureRequests: [],
@@ -69,23 +69,23 @@ export const strictLimiter = rateLimit({
 })
 
 // ── CORS — allow same-origin (frontend served from here) + any listed FRONTEND_URL
-app.use(cors({
+const ALLOWED_ORIGINS = new Set([
+  process.env.FRONTEND_URL,
+  'http://localhost:3000',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500',
+].filter(Boolean))
+const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true)
-    const allowed = new Set([
-      process.env.FRONTEND_URL,
-      'http://localhost:3000',
-      'http://localhost:5500',
-      'http://127.0.0.1:5500',
-    ].filter(Boolean))
-    if (allowed.has(origin)) return cb(null, true)
-    if (origin.endsWith('.railway.app') || origin.endsWith('.up.railway.app')) return cb(null, true)
+    if (ALLOWED_ORIGINS.has(origin)) return cb(null, true)
     cb(new Error(`CORS: origin ${origin} not allowed`))
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-}))
-app.options('*', cors())
+}
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 app.use(express.json({ limit: '2mb' }))
 
 // ── API Routes ────────────────────────────────────────────────────────────────
@@ -98,8 +98,11 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Thyroxeia AI', version: '1.0.0' })
 })
 
+// ── Admin rate limiter — 10 req / 15 min
+const adminLimiter = rateLimit({ windowMs: 15*60*1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many admin requests.' } })
+
 // ── Admin: view users + payment proof (requires X-Admin-Key header) ───────────
-app.get('/admin/users', async (req, res) => {
+app.get('/admin/users', adminLimiter, async (req, res) => {
   const adminKey = req.headers['x-admin-key']
   if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden — invalid admin key' })
@@ -140,12 +143,12 @@ app.get('/admin/users', async (req, res) => {
     res.json({ total: users.length, summary, users })
   } catch (err) {
     console.error('[Admin users error]', err.message)
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
 // ── Admin: AI usage stats ─────────────────────────────────────────────────────
-app.get('/admin/usage', async (req, res) => {
+app.get('/admin/usage', adminLimiter, async (req, res) => {
   const adminKey = req.headers['x-admin-key']
   if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
     return res.status(403).json({ error: 'Forbidden — invalid admin key' })
@@ -163,7 +166,7 @@ app.get('/admin/usage', async (req, res) => {
 
     res.json({ date: today, total_calls_today: data?.length || 0, calls: data })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -179,7 +182,7 @@ app.get('*', (_req, res) => {
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
   console.error('[ERROR]', err.message)
-  res.status(500).json({ error: err.message || 'Internal server error' })
+  res.status(500).json({ error: 'Internal server error' })
 })
 
 app.listen(PORT, () => {

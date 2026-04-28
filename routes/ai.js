@@ -23,7 +23,8 @@ const router = Router()
 const GEMINI_MODEL = 'gemini-2.0-flash-lite'
 const GEMINI_BASE  = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-const PLAN_LIMITS = { free: 5, student: 20, pro: 50, elite: 50 }
+// Match pricing page: free=10, student=30, pro/elite=unlimited (9999)
+const PLAN_LIMITS = { free: 10, student: 30, pro: 9999, elite: 9999 }
 
 // ── Key rotation pool ─────────────────────────────────────────────────────────
 function buildKeyPool() {
@@ -134,7 +135,7 @@ async function getUserPlan(userId) {
 
 // ── Daily usage check + increment ────────────────────────────────────────────
 async function checkAndIncrementUsage(userId, plan) {
-  const limit = PLAN_LIMITS[plan] || 5
+  const limit = PLAN_LIMITS[plan] || 10
   if (!sb) {
     console.warn('[AI] Supabase not configured — skipping usage tracking')
     return { allowed: true, used: 0, limit }
@@ -147,7 +148,8 @@ async function checkAndIncrementUsage(userId, plan) {
     .gte('created_at', `${today}T00:00:00.000Z`)
 
   const current = count || 0
-  if (current >= limit) return { allowed: false, used: current, limit }
+  // Skip quota check for unlimited plans
+  if (limit < 9999 && current >= limit) return { allowed: false, used: current, limit }
 
   // Insert usage record
   await sb.from('ai_usage').insert({
@@ -278,7 +280,7 @@ router.post('/', async (req, res) => {
 
   } catch (err) {
     console.error('[AI route error]', err.message)
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'AI request failed. Please try again.' })
   }
 })
 

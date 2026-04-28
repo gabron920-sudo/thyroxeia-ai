@@ -178,7 +178,7 @@ router.post('/', async (req, res) => {
 
   } catch (err) {
     console.error('[Payment route error]', err.message)
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'Payment processing failed. Please try again.' })
   }
 })
 
